@@ -81,3 +81,6 @@ To run the linter you can use the `make lint` target.
 
 > [!IMPORTANT]  
 > By default there is golangci-lint config presented. Since the long-term goal is to merge the module back to the grafana/k6 we use the k6's linter rules. The rule set will be downloaded automatically while the first run of the `make lint` or you could do that manually by running `make linter-config`.
+
+
+xk6 build latest --with github.com/grafana/xk6-grpc=.
