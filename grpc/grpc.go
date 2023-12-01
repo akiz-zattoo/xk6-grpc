@@ -4,8 +4,10 @@ package grpc
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/dop251/goja"
+	"github.com/grafana/xk6-grpc/lib/netext/grpcext"
 	"github.com/mstoykov/k6-taskqueue-lib/taskqueue"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
@@ -13,15 +15,25 @@ import (
 )
 
 type (
+	ReusableConn struct {
+		conn        *grpcext.Conn
+		streamCount int
+	}
 	// RootModule is the global module instance that will create module
 	// instances for each VU.
-	RootModule struct{}
+	RootModule struct {
+		mu                 sync.Mutex
+		maxStreamsPerConn  int
+		grpcClientConnPool map[string][]*ReusableConn
+		grpcConnCount      int
+	}
 
 	// ModuleInstance represents an instance of the GRPC module for every VU.
 	ModuleInstance struct {
-		vu      modules.VU
-		exports map[string]interface{}
-		metrics *instanceMetrics
+		vu         modules.VU
+		exports    map[string]interface{}
+		metrics    *instanceMetrics
+		rootModule *RootModule
 	}
 )
 
@@ -32,21 +44,25 @@ var (
 
 // New returns a pointer to a new RootModule instance.
 func New() *RootModule {
-	return &RootModule{}
+	return &RootModule{
+		maxStreamsPerConn:  100,
+		grpcClientConnPool: make(map[string][]*ReusableConn),
+	}
 }
 
 // NewModuleInstance implements the modules.Module interface to return
 // a new instance for each VU.
-func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
+func (rm *RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 	metrics, err := registerMetrics(vu.InitEnv().Registry)
 	if err != nil {
 		common.Throw(vu.Runtime(), fmt.Errorf("failed to register GRPC module metrics: %w", err))
 	}
 
 	mi := &ModuleInstance{
-		vu:      vu,
-		exports: make(map[string]interface{}),
-		metrics: metrics,
+		vu:         vu,
+		exports:    make(map[string]interface{}),
+		metrics:    metrics,
+		rootModule: rm,
 	}
 
 	mi.exports["Client"] = mi.NewClient
@@ -59,7 +75,7 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 // NewClient is the JS constructor for the grpc Client.
 func (mi *ModuleInstance) NewClient(_ goja.ConstructorCall) *goja.Object {
 	rt := mi.vu.Runtime()
-	return rt.ToValue(&Client{vu: mi.vu}).ToObject(rt)
+	return rt.ToValue(&Client{vu: mi.vu, rm: mi.rootModule}).ToObject(rt)
 }
 
 // defineConstants defines the constant variables of the module.
@@ -97,6 +113,8 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 
 // stream returns a new stream object
 func (mi *ModuleInstance) stream(c goja.ConstructorCall) *goja.Object {
+	// mi.rootModule.mu.Lock()
+	// defer mi.rootModule.mu.Unlock()
 	rt := mi.vu.Runtime()
 
 	client, err := extractClient(c.Argument(0), rt)
@@ -148,7 +166,6 @@ func (mi *ModuleInstance) stream(c goja.ConstructorCall) *goja.Object {
 
 		common.Throw(rt, err)
 	}
-
 	return s.obj
 }
 

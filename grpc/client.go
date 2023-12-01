@@ -36,6 +36,7 @@ type Client struct {
 	conn *grpcext.Conn
 	vu   modules.VU
 	addr string
+	rm   *RootModule
 }
 
 // Load will parse the given proto files and make the file descriptors available to request.
@@ -206,6 +207,8 @@ func buildTLSConfigFromMap(parentConfig *tls.Config, tlsConfigMap map[string]int
 
 // Connect is a block dial to the gRPC server at the given address (host:port)
 func (c *Client) Connect(addr string, params goja.Value) (bool, error) {
+	c.rm.mu.Lock()
+	defer c.rm.mu.Unlock()
 	state := c.vu.State()
 	if state == nil {
 		return false, common.NewInitContextError("connecting to a gRPC server in the init context is not supported")
@@ -250,7 +253,25 @@ func (c *Client) Connect(addr string, params goja.Value) (bool, error) {
 	}
 
 	c.addr = addr
-	c.conn, err = grpcext.Dial(ctx, addr, opts...)
+	connPoolLen := len(c.rm.grpcClientConnPool[addr])
+
+	if connPoolLen != 0 && c.rm.grpcClientConnPool[addr][connPoolLen-1].streamCount < c.rm.maxStreamsPerConn {
+		// fmt.Println("reusing connection ", c.rm.grpcConnCount)
+		c.conn = c.rm.grpcClientConnPool[addr][connPoolLen-1].conn
+		// client.connect is called in the k6 test implementation per stream under current setup
+		// so this is equivalent to number of streams
+		c.rm.grpcClientConnPool[addr][connPoolLen-1].streamCount++
+	} else {
+		// fmt.Println("creating new connection", c.rm.grpcConnCount+1)
+		c.conn, err = grpcext.Dial(ctx, addr, opts...)
+		if err == nil {
+			// fmt.Println("created connection", c.rm.grpcConnCount+1)
+			reusableConn := ReusableConn{conn: c.conn, streamCount: 1}
+			c.rm.grpcClientConnPool[addr] = append(c.rm.grpcClientConnPool[addr], &reusableConn)
+
+			c.rm.grpcConnCount++
+		}
+	}
 	if err != nil {
 		return false, err
 	}
